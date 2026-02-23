@@ -13,3 +13,11 @@ End-to-end fraud detection pipeline that generates synthetic timesheet data with
 **Stack:** Python, pandas, scipy, scikit-learn, seaborn, openpyxl
 
 ![Fraud Analysis](./timesheet-fraud-lab/images/fraud_analysis_chart.png)
+
+---
+
+### [Card Testing Fraud Detection](./card-testing-detection/)
+
+Simulates card testing attacks against a payment processing database, then uses three layers of SQL analytical queries (velocity analysis, rapid-fire detection, BIN pattern analysis) to detect them using CTEs, window functions, and composite scoring.
+
+**Stack:** Python, PostgreSQL, SQL (CTEs, Window Functions, CASE scoring)
