@@ -21,3 +21,13 @@ End-to-end fraud detection pipeline that generates synthetic timesheet data with
 Simulates card testing attacks against a payment processing database, then uses three layers of SQL analytical queries (velocity analysis, rapid-fire detection, BIN pattern analysis) to detect them using CTEs, window functions, and composite scoring.
 
 **Stack:** Python, PostgreSQL, SQL (CTEs, Window Functions, CASE scoring)
+
+---
+
+### [Financial Forensic Audit Lab](./forensic-audit-lab/)
+
+Generates ~15,000 realistic transactions with 5 injected fraud patterns (split purchase, duplicate invoice, ghost vendor, inflated amount, round number) and detects them using Excel formulas, Pivot Tables, and Power Query. Includes an N8N workflow that runs all 5 SQL detections in parallel and feeds results to an AI agent for automated classification and executive summary generation.
+
+**Stack:** Python, scipy, pandas, Excel (Formulas, Pivot Tables, Power Query), PostgreSQL, N8N, Gemma (Ollama)
+
+![Forensic Audit](./forensic-audit-lab/images/forensic_audit_overview.png)
