@@ -12,7 +12,7 @@ End-to-end fraud detection pipeline that generates synthetic timesheet data with
 
 **Stack:** Python, pandas, scipy, scikit-learn, seaborn, openpyxl
 
-
+![Fraud Analysis](./timesheet-fraud-lab/images/fraud_analysis_chart.png)
 
 ---
 
@@ -24,10 +24,10 @@ Simulates card testing attacks against a payment processing database, then uses 
 
 ---
 
-
+### [Financial Forensic Audit Lab](./forensic-audit-lab/)
 
 Generates ~15,000 realistic transactions with 5 injected fraud patterns (split purchase, duplicate invoice, ghost vendor, inflated amount, round number) and detects them using Excel formulas, Pivot Tables, and Power Query. Includes an N8N workflow that runs all 5 SQL detections in parallel and feeds results to an AI agent for automated classification and executive summary generation.
 
 **Stack:** Python, scipy, pandas, Excel (Formulas, Pivot Tables, Power Query), PostgreSQL, N8N, Gemma (Ollama)
 
-
+![Forensic Audit](./forensic-audit-lab/images/forensic_audit_overview.png)
