@@ -1,6 +1,0 @@
-fraud_type,num_transactions,num_employees,avg_amount,total_amount
-duplicate_invoice,32,2,2762.8071875,88409.83
-ghost_vendor,30,2,3426.477,102794.31
-inflated_amount,40,2,1342.65625,53706.25
-round_number,40,2,2225.0,89000.0
-split_purchase,45,2,1836.0335555555555,82621.51
