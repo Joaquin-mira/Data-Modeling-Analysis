@@ -1,0 +1,439 @@
+{
+  "name": "Forensic Audit Pipeline",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -224,
+        208
+      ],
+      "id": "d8fbffc7-48da-4591-b5e1-b28660c40f9f",
+      "name": "Run Audit"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- SPLIT PURCHASE DETECTION\nWITH daily_groups AS (\n    SELECT\n        employee_id,\n        vendor_id,\n        date,\n        COUNT(*) AS num_transactions,\n        SUM(amount) AS group_total,\n        MAX(amount) AS max_single,\n        ROUND(AVG(amount), 2) AS avg_fragment,\n        STRING_AGG(transaction_id::TEXT, ', ') AS transaction_ids\n    FROM transactions\n    GROUP BY employee_id, vendor_id, date\n)\nSELECT\n    employee_id,\n    vendor_id,\n    date::TEXT,\n    num_transactions AS fragments,\n    group_total AS real_total,\n    max_single,\n    avg_fragment,\n    CASE\n        WHEN group_total > 7000 AND num_transactions >= 4 THEN 'CRITICAL'\n        WHEN group_total > 5000 AND num_transactions >= 3 THEN 'HIGH'\n        ELSE 'MEDIUM'\n    END AS risk_level\nFROM daily_groups\nWHERE num_transactions > 1\n  AND group_total > 5000\n  AND max_single < 5000\nORDER BY group_total DESC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        0
+      ],
+      "id": "9b6c813f-bf47-47dd-b804-ea3535e4161f",
+      "name": "Detect Split Purchases",
+      "credentials": {
+        "postgres": {
+          "id": "DOgqx72k2ZY1lwQE",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- DUPLICATE INVOICE DETECTION\nWITH exact_duplicates AS (\n    SELECT\n        invoice_number,\n        COUNT(*) AS times_submitted,\n        STRING_AGG(DISTINCT employee_id, ', ') AS employees_involved,\n        MIN(amount) AS min_amount,\n        MAX(amount) AS max_amount,\n        ROUND(ABS(MAX(amount) - MIN(amount)) / NULLIF(MIN(amount), 0) * 100, 2) AS pct_difference,\n        MIN(date)::TEXT AS first_submitted,\n        MAX(date)::TEXT AS last_submitted,\n        MAX(date) - MIN(date) AS days_apart\n    FROM transactions\n    GROUP BY invoice_number\n    HAVING COUNT(*) > 1\n)\nSELECT\n    invoice_number,\n    times_submitted,\n    employees_involved,\n    min_amount,\n    max_amount,\n    pct_difference,\n    first_submitted,\n    last_submitted,\n    days_apart,\n    CASE\n        WHEN pct_difference < 1 THEN 'EXACT COPY'\n        WHEN pct_difference < 5 THEN 'NEAR DUPLICATE'\n        ELSE 'AMOUNT MISMATCH'\n    END AS duplicate_type\nFROM exact_duplicates\nORDER BY pct_difference ASC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        208
+      ],
+      "id": "89e2f648-199e-4830-b2d8-607ff792464f",
+      "name": "Detect Duplicate Invoices",
+      "credentials": {
+        "postgres": {
+          "id": "DOgqx72k2ZY1lwQE",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- GHOST VENDOR DETECTION\nWITH vendor_profile AS (\n    SELECT\n        vendor_id,\n        COUNT(DISTINCT employee_id) AS unique_employees,\n        COUNT(*) AS total_transactions,\n        ROUND(AVG(amount), 2) AS avg_amount,\n        ROUND(SUM(amount), 2) AS total_amount,\n        STRING_AGG(DISTINCT employee_id, ', ') AS employees\n    FROM transactions\n    GROUP BY vendor_id\n)\nSELECT\n    vendor_id,\n    unique_employees,\n    employees,\n    total_transactions,\n    avg_amount,\n    total_amount,\n    CASE\n        WHEN unique_employees = 1 THEN 'CRITICAL'\n        WHEN unique_employees <= 3 THEN 'HIGH'\n        ELSE 'LOW'\n    END AS risk_level\nFROM vendor_profile\nWHERE unique_employees <= 3\nORDER BY unique_employees ASC, total_amount DESC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        400
+      ],
+      "id": "da6ab1a0-4468-4ac8-ae39-fe4d1d6acb80",
+      "name": "Detect Ghost Vendors",
+      "credentials": {
+        "postgres": {
+          "id": "DOgqx72k2ZY1lwQE",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- INFLATED AMOUNT DETECTION\nWITH ranked AS (\n    SELECT\n        employee_id,\n        category,\n        amount,\n        PERCENT_RANK() OVER (PARTITION BY category ORDER BY amount) AS cat_percentile\n    FROM transactions\n),\nemp_dist AS (\n    SELECT\n        employee_id,\n        MIN(category) AS category,\n        COUNT(*) AS total_transactions,\n        ROUND(AVG(amount), 2) AS emp_avg,\n        ROUND(SUM(CASE WHEN cat_percentile > 0.75 THEN 1 ELSE 0 END)::NUMERIC / COUNT(*) * 100, 1) AS pct_top_quartile,\n        ROUND(SUM(CASE WHEN cat_percentile > 0.90 THEN 1 ELSE 0 END)::NUMERIC / COUNT(*) * 100, 1) AS pct_top_decile\n    FROM ranked\n    GROUP BY employee_id\n)\nSELECT\n    employee_id,\n    category,\n    total_transactions,\n    emp_avg,\n    pct_top_quartile,\n    pct_top_decile,\n    CASE\n        WHEN pct_top_quartile > 35 AND pct_top_decile > 15 THEN 'HIGH'\n        WHEN pct_top_quartile > 30 THEN 'MEDIUM'\n        ELSE 'LOW'\n    END AS risk_level\nFROM emp_dist\nWHERE pct_top_quartile > 28\nORDER BY pct_top_quartile DESC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        608
+      ],
+      "id": "ed96a7ef-7ff2-4495-914b-e7580f45cbfb",
+      "name": "Detect Inflated Amounts",
+      "credentials": {
+        "postgres": {
+          "id": "DOgqx72k2ZY1lwQE",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- ROUND NUMBER DETECTION\nWITH round_flagged AS (\n    SELECT\n        employee_id,\n        COUNT(*) AS total_transactions,\n        SUM(CASE WHEN MOD(amount::INT, 500) = 0 AND MOD(amount, 1) = 0 THEN 1 ELSE 0 END) AS round_count,\n        ROUND(\n            SUM(CASE WHEN MOD(amount::INT, 500) = 0 AND MOD(amount, 1) = 0 THEN 1 ELSE 0 END)::NUMERIC\n            / COUNT(*) * 100, 1\n        ) AS round_pct,\n        STRING_AGG(\n            DISTINCT CASE WHEN MOD(amount::INT, 500) = 0 AND MOD(amount, 1) = 0 THEN amount::TEXT END, ', '\n        ) AS round_amounts_used\n    FROM transactions\n    GROUP BY employee_id\n)\nSELECT\n    employee_id,\n    total_transactions,\n    round_count,\n    round_pct,\n    round_amounts_used,\n    CASE\n        WHEN round_pct > 10 THEN 'CRITICAL'\n        WHEN round_pct > 5 THEN 'HIGH'\n        WHEN round_pct > 2 THEN 'MEDIUM'\n        ELSE 'LOW'\n    END AS risk_level\nFROM round_flagged\nWHERE round_count > 0\nORDER BY round_pct DESC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        800
+      ],
+      "id": "16f463cb-bc42-45f6-b0f3-d698417bc65b",
+      "name": "Detect Round Numbers",
+      "credentials": {
+        "postgres": {
+          "id": "DOgqx72k2ZY1lwQE",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=You are an expert Forensic Auditor specializing in Anti-Money Laundering (AML) and corporate fraud prevention.\n\nYou will receive an automated audit report containing findings from 5 detection layers run against a corporate transaction database. Your objectives are:\n\n1. PRIORITIZE: Rank the findings by severity and confidence. Which cases are almost certainly fraud? Which might be false positives?\n\n2. CLASSIFY each finding as:\n   - CONFIRMED FRAUD (strong evidence, multiple signals)\n   - PROBABLE FRAUD (single strong signal)\n   - NEEDS INVESTIGATION (suspicious but could be legitimate)\n   - LIKELY FALSE POSITIVE (explain why)\n\n3. CROSS-REFERENCE: Identify employees that appear in multiple detection layers. An employee flagged by 2+ detections is higher priority.\n\n4. EXECUTIVE SUMMARY: Write a 5-7 sentence summary for a non-technical CFO that explains what was found, the estimated financial impact, and recommended next steps.\n\n5. RECOMMENDED ACTIONS: For each confirmed/probable fraud case, suggest specific investigation steps.\n\nHere is the audit report:\n\n{{ $json.audit_report }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        560,
+        400
+      ],
+      "id": "a26a03bf-40da-408a-94c0-d0830df0511b",
+      "name": "AI Forensic Auditor"
+    },
+    {
+      "parameters": {
+        "model": "gemma2:2b",
+        "options": {
+          "temperature": 0.3
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        560,
+        592
+      ],
+      "id": "1afbf945-4fbc-4696-a1b3-4d18ba7f8734",
+      "name": "Gemma",
+      "credentials": {
+        "ollamaApi": {
+          "id": "tZS1bgUmTaZUloro",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputText = $input.item.json.output;\n\nconst empPattern = /EMP-\\d+/g;\nconst provPattern = /PROV-\\d+/g;\n\nconst employees = [...new Set(inputText.match(empPattern) || [])];\nconst vendors = [...new Set(inputText.match(provPattern) || [])];\n\nlet severity = 'LOW';\nif (inputText.includes('CONFIRMED FRAUD')) severity = 'CRITICAL';\nelse if (inputText.includes('PROBABLE FRAUD')) severity = 'HIGH';\nelse if (inputText.includes('NEEDS INVESTIGATION')) severity = 'MEDIUM';\n\nreturn {\n  ai_analysis: inputText,\n  flagged_employees: employees,\n  flagged_vendors: vendors,\n  overall_severity: severity,\n  timestamp: new Date().toISOString()\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        400
+      ],
+      "id": "3af42585-1360-4f7f-b58d-42faedfd576e",
+      "name": "Parse AI Output"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS audit_reports (\n  id SERIAL PRIMARY KEY,\n  ai_analysis TEXT,\n  flagged_employees TEXT,\n  flagged_vendors TEXT,\n  overall_severity VARCHAR(20),\n  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n);\n\nINSERT INTO audit_reports (ai_analysis, flagged_employees, flagged_vendors, overall_severity)\nVALUES (\n  '{{ $json.ai_analysis }}',\n  '{{ $json.flagged_employees }}',\n  '{{ $json.flagged_vendors }}',\n  '{{ $json.overall_severity }}'\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1088,
+        288
+      ],
+      "id": "69f46c48-0a16-4232-8fb8-d2ffa20e9a8f",
+      "name": "Save Report to DB",
+      "credentials": {
+        "postgres": {
+          "id": "DOgqx72k2ZY1lwQE",
+          "name": "PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-critical",
+              "leftValue": "={{ $json.overall_severity }}",
+              "rightValue": "CRITICAL",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1104,
+        544
+      ],
+      "id": "a402b938-c664-4ad4-b4df-91085f97bce6",
+      "name": "Is Critical?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const analysis = $('Parse AI Output').item.json;\n\nconst subject = `⚠️ CRITICAL: Forensic Audit Alert — ${analysis.flagged_employees.length} employees flagged`;\n\nlet body = `AUTOMATED FORENSIC AUDIT ALERT\\n`;\nbody += `Severity: ${analysis.overall_severity}\\n`;\nbody += `Timestamp: ${analysis.timestamp}\\n\\n`;\nbody += `Flagged Employees: ${analysis.flagged_employees.join(', ')}\\n`;\nbody += `Flagged Vendors: ${analysis.flagged_vendors.join(', ')}\\n\\n`;\nbody += `--- AI ANALYSIS ---\\n\\n`;\nbody += analysis.ai_analysis;\n\nreturn { subject, body };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        544
+      ],
+      "id": "f1864461-5273-42cc-bb54-74c2456bc87e",
+      "name": "Format Alert Email"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst splits = $('Detect Split Purchases').all();\nconst duplicates = $('Detect Duplicate Invoices').all();\nconst ghosts = $('Detect Ghost Vendors').all();\nconst inflated = $('Detect Inflated Amounts').all();\nconst rounds = $('Detect Round Numbers').all();\n\nlet report = '=== FORENSIC AUDIT REPORT ===\\n\\n';\n\n// Split Purchases\nreport += `--- SPLIT PURCHASE DETECTION ---\\nFindings: ${splits.length} events\\n\\n`;\nsplits.forEach((item, i) => {\n  const d = item.json;\n  report += `Case ${i+1}: ${d.employee_id} → ${d.vendor_id} on ${d.date}\\n`;\n  report += `  Fragments: ${d.fragments}, Real Total: $${d.real_total}, Max Single: $${d.max_single}, Risk: ${d.risk_level}\\n\\n`;\n});\n\n// Duplicate Invoices\nreport += `--- DUPLICATE INVOICE DETECTION ---\\nFindings: ${duplicates.length} duplicate invoices\\n\\n`;\nduplicates.forEach((item, i) => {\n  const d = item.json;\n  report += `Case ${i+1}: Invoice ${d.invoice_number} submitted ${d.times_submitted}x by ${d.employees_involved}\\n`;\n  report += `  Amounts: $${d.min_amount} / $${d.max_amount} (${d.pct_difference}% diff), ${d.days_apart} days apart, Type: ${d.duplicate_type}\\n\\n`;\n});\n\n// Ghost Vendors\nconst criticalGhosts = ghosts.filter(g => g.json.risk_level === 'CRITICAL');\nreport += `--- GHOST VENDOR DETECTION ---\\nFindings: ${criticalGhosts.length} vendors with single-employee relationship\\n\\n`;\ncriticalGhosts.forEach((item, i) => {\n  const d = item.json;\n  report += `Case ${i+1}: ${d.vendor_id} → only employee: ${d.employees}\\n`;\n  report += `  Transactions: ${d.total_transactions}, Avg Amount: $${d.avg_amount}, Total Billed: $${d.total_amount}\\n\\n`;\n});\n\n// Inflated Amounts\nconst suspiciousInflated = inflated.filter(inf => inf.json.risk_level !== 'LOW');\nreport += `--- INFLATED AMOUNT DETECTION ---\\nFindings: ${suspiciousInflated.length} employees with above-normal spending patterns\\n\\n`;\nsuspiciousInflated.forEach((item, i) => {\n  const d = item.json;\n  report += `Case ${i+1}: ${d.employee_id} (${d.category})\\n`;\n  report += `  Avg Amount: $${d.emp_avg}, Top Quartile: ${d.pct_top_quartile}%, Top Decile: ${d.pct_top_decile}%, Risk: ${d.risk_level}\\n\\n`;\n});\n\n// Round Numbers\nconst suspiciousRounds = rounds.filter(r => r.json.risk_level === 'CRITICAL' || r.json.risk_level === 'HIGH');\nreport += `--- ROUND NUMBER DETECTION ---\\nFindings: ${suspiciousRounds.length} employees with suspicious round number patterns\\n\\n`;\nsuspiciousRounds.forEach((item, i) => {\n  const d = item.json;\n  report += `Case ${i+1}: ${d.employee_id}\\n`;\n  report += `  Round Count: ${d.round_count}/${d.total_transactions} (${d.round_pct}%), Amounts: ${d.round_amounts_used}, Risk: ${d.risk_level}\\n\\n`;\n});\n\n// Summary\nconst allEmployees = new Set();\nsplits.forEach(s => allEmployees.add(s.json.employee_id));\nduplicates.forEach(d => allEmployees.add(d.json.employees_involved));\ncriticalGhosts.forEach(g => allEmployees.add(g.json.employees));\nsuspiciousInflated.forEach(inf => allEmployees.add(inf.json.employee_id));\nsuspiciousRounds.forEach(r => allEmployees.add(r.json.employee_id));\n\nreport += `--- SUMMARY ---\\n`;\nreport += `Total unique employees flagged: ${allEmployees.size}\\n`;\nreport += `Split purchase events: ${splits.length}\\n`;\nreport += `Duplicate invoices: ${duplicates.length}\\n`;\nreport += `Ghost vendors: ${criticalGhosts.length}\\n`;\nreport += `Inflated amount suspects: ${suspiciousInflated.length}\\n`;\nreport += `Round number suspects: ${suspiciousRounds.length}\\n`;\n\nreturn { audit_report: report, timestamp: new Date().toISOString() };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        400
+      ],
+      "id": "660cbc78-a004-4a85-bd1f-c507e20fb9fa",
+      "name": "Format Audit Report1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 5,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        256,
+        352
+      ],
+      "id": "c34d01b3-92b6-47d8-b242-df9edf1b7c28",
+      "name": "Wait for Analysis"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Run Audit": {
+      "main": [
+        [
+          {
+            "node": "Detect Split Purchases",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Detect Duplicate Invoices",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Detect Ghost Vendors",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Detect Inflated Amounts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Detect Round Numbers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Split Purchases": {
+      "main": [
+        [
+          {
+            "node": "Wait for Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Duplicate Invoices": {
+      "main": [
+        [
+          {
+            "node": "Wait for Analysis",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Detect Ghost Vendors": {
+      "main": [
+        [
+          {
+            "node": "Wait for Analysis",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Detect Inflated Amounts": {
+      "main": [
+        [
+          {
+            "node": "Wait for Analysis",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Detect Round Numbers": {
+      "main": [
+        [
+          {
+            "node": "Wait for Analysis",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Gemma": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Forensic Auditor",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Forensic Auditor": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Output": {
+      "main": [
+        [
+          {
+            "node": "Save Report to DB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Is Critical?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Critical?": {
+      "main": [
+        [
+          {
+            "node": "Format Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Audit Report1": {
+      "main": [
+        [
+          {
+            "node": "AI Forensic Auditor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Analysis": {
+      "main": [
+        [
+          {
+            "node": "Format Audit Report1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "b75a4e93-94b9-4859-b8ce-5ad116c54a26",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "133f842065a1c3c7c4098c10eacfecec8074c19367c062a5cf0b09c1c5041a7d"
+  },
+  "id": "3vPVpErwJeZK5dka",
+  "tags": []
+}
